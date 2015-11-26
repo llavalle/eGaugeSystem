@@ -1,29 +1,7 @@
-/**
- *  eGauge Energy Monitoring System
- * 
-<measurements serial="0x0123456789">
-  <timestamp>1447853826</timestamp>
-  <cpower src="Grid" i="3" u="1">360.6</cpower>
-  <cpower src="Grid" i="2" u="0">595.6</cpower>
-    [...]
-  <meter title="Grid">
-    <energy>166.0</energy>
-    <energyWs>597703450</energyWs>
-    <power>956.2</power>
-  </meter>
-  <frequency>59.99</frequency>
-  <voltage ch="0">121.34</voltage>
-  <voltage ch="1">121.88</voltage>
-    [...]
-  <current ch="15">0.013</current>
-</measurements>
- 
- */
- 
+
 preferences 
 {
    input("uri", "text", title: "eGauge Monitor URL");
-   input("uri2", "text", title: "eGauge2 Monitor URL");
 }
 
 metadata 
@@ -44,7 +22,7 @@ metadata
       // TODO: define status and reply messages here
    }
 
-   tiles(scale:2)  
+   tiles(scale:2)   
    {
       /*multiAttributeTile(name:"totalbig", type: "generic", width: 6, height: 4)
       {
@@ -68,6 +46,10 @@ metadata
       {
          state("BachGridPower", label: '${currentValue}W\nBachGrid', unit:"W", backgroundColor: "#0000CC");
       }    
+      valueTile("last24HkWh", "device.Last24HkWh", width: 2, height: 2) 
+      {
+         state("Last24HkWh", label: '${currentValue}kWh\nLast24h', unit:"kWh", backgroundColor: "#0000CC");
+      }   
 
       standardTile("refresh", "device.refresh", decoration: "flat", width: 2, height: 2) 
       {
@@ -77,7 +59,7 @@ metadata
       //main (["totalbig"]);
       //details(["totalbig","evcharging","maingrid", "bachgrid", "refresh"]);
       main (["evcharging"]);
-      details(["evcharging","maingrid", "bachgrid", "refresh"]);
+      details(["evcharging","maingrid", "bachgrid", "last24HkWh", "refresh"]);
 
    }
 }
@@ -92,29 +74,35 @@ def refresh()
    energyRefresh()
 }
 
-def processResponse(xml){
+def processResponse(csv){
     def snapshot = [:]
 
+    def lineSplit = csv.split("\r\n") 
 
+    def headers = lineSplit[0].split(',')
+    def lines = lineSplit[1].split(',')
+
+	log.debug lineSplit[0]
+    log.debug lineSplit[1]
+    
     def i = 0
-    xml.data.cname.each{
-        snapshot[it.text().toString()] = xml.data.r.c[i].text().toLong()
+    headers.each{
+        snapshot[it - "\"" - " [Vs]\"" - " [kWh]\""] = (Double.parseDouble(lines[i]) * 3600 * 1000).toLong()
         i++
-            }
+    }
 
-    snapshot.ts = Long.parseLong(xml.data.@time_stamp.text()[2..-1],16)
+    snapshot.ts = Long.parseLong(lines[0])
 
     return snapshot
 }
 
-def takeSnapshot(snapUri){
-    log.debug "taking snapshot"
-    log.debug (snapUri)
+def takeSnapshot(snapUri){   
+    def retVal
     
     httpGet(snapUri){resp ->
         
         if (resp.data) {
-            return processResponse(resp.data);
+            retVal = processResponse(resp.data.text);
         }
 
         if(resp.status == 200) {
@@ -124,8 +112,7 @@ def takeSnapshot(snapUri){
             log.error "polling children & got http status ${resp.status}"
         }
      }
-     
-     log.debug "snapshot taken"
+     return retVal
 }
 
 def calcAvgPower(Long oldTS, Long newTS, Long oldVal, Long newVal){
@@ -150,28 +137,38 @@ def energyRefresh() {
 
 
     log.debug "Poking eGauge for 15s avg"
-    def newSnapSeconds = takeSnapshot("${settings.uri}/cgi-bin/egauge-show?S&a&n=1")
+    def newSnapSeconds = takeSnapshot("${settings.uri}/cgi-bin/egauge-show?S&a&n=1&c")
     def previousTSSeconds = newSnapSeconds.ts - 15
-    def oldSnapSeconds = takeSnapshot("${settings.uri}/cgi-bin/egauge-show?S&a&n=1&f=${previousTSSeconds}")
+    def oldSnapSeconds = takeSnapshot("${settings.uri}/cgi-bin/egauge-show?S&a&n=1&c&f=${previousTSSeconds}")
     log.debug "Done"
 
-    def avg15sPowerTotal = calcAvgPower(oldSnapSeconds.ts, newSnapSeconds.ts, oldSnapSeconds.use,newSnapSeconds.use)
-    def avg15sPowerMain = calcAvgPower(oldSnapSeconds.ts, newSnapSeconds.ts, oldSnapSeconds['Grid+'],newSnapSeconds['Grid+'])
-    def avg15sPowerBach = calcAvgPower(oldSnapSeconds.ts, newSnapSeconds.ts, oldSnapSeconds['Bach Grid'],newSnapSeconds['Bach Grid'])
+
+    def avg15sPower = calcAvgPower(oldSnapSeconds.ts, newSnapSeconds.ts, oldSnapSeconds.Usage,newSnapSeconds.Usage)
+    def avg15sPowerGrid = calcAvgPower(oldSnapSeconds.ts, newSnapSeconds.ts, oldSnapSeconds["Grid+"],newSnapSeconds["Grid+"])
+    def avg15sPowerBach = calcAvgPower(oldSnapSeconds.ts, newSnapSeconds.ts, oldSnapSeconds["Bach Grid"],newSnapSeconds["Bach Grid"])
     log.debug(avg15sPower + "W")
+    log.debug(avg15sPowerGrid + "W")
+    log.debug(avg15sPowerBach + "W")
 
     log.debug "Poking eGauge for last 24h"
-    def newSnapMinutes = takeSnapshot("${settings.uri}/cgi-bin/egauge-show?m&a&n=1")
+    def newSnapMinutes = takeSnapshot("${settings.uri}/cgi-bin/egauge-show?m&a&c&n=1")
     def previousTSMinutes = newSnapMinutes.ts - (24*60*60)
-    def oldSnapMinutes = takeSnapshot("${settings.uri}/cgi-bin/egauge-show?m&a&n=1&f=${previousTSMinutes}")
+    def oldSnapMinutes = takeSnapshot("${settings.uri}/cgi-bin/egauge-show?m&a&c&n=1&f=${previousTSMinutes}")
     log.debug "Done"
 
-    def tot24hpower = calcDiffPower(oldSnapMinutes.use,newSnapMinutes.use)
-    log.debug Math.round(tot24hpower/1000/60/60)
+    def tot24hpower = calcDiffPower(oldSnapMinutes.Usage,newSnapMinutes.Usage)
     
-    delayBetween([sendEvent(name: 'power', value: avg15sPowerTotal)
-                 ,sendEvent(name: 'MainGridPower', value: avg15sPowerMain)
+    log.debug "power: " + avg15sPower
+    log.debug "MainGridPower: " + avg15sPowerGrid
+    log.debug "BachGridPower: " + avg15sPowerGrid
+    log.debug "Last24HkWh: " + Math.round(tot24hpower/1000/60/60)
+    
+    delayBetween([sendEvent(name: 'power', value: avg15sPower)
+                 ,sendEvent(name: 'MainGridPower', value: avg15sPowerGrid)
                  ,sendEvent(name: 'BachGridPower', value: avg15sPowerBach)
+                 ,sendEvent(name: 'Last24HkWh', value: Math.round(tot24hpower/1000/60/60))
                  ]
                 )
 }
+
+
